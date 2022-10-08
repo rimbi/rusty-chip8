@@ -2,6 +2,14 @@
 name = "rusty-chip8"
 version = "0.1.0"
 edition = "2021"
+authors = ["Cem Eliguzel <cemeliguzel@email.com>"]
+license = "MIT OR Apache-2.0"
+description = "Chip8 emulator/interpreter"
+readme = "README.md"
+homepage = "https://github.com/rimbi/rusty-chip8"
+repository = "https://github.com/rimbi/rusty-chip8"
+keywords = ["game", "emulator", "chip8", "interpreter"]
+categories = ["games", "interpreters", "emulators"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
