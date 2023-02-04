@@ -1,6 +1,6 @@
 [package]
 name = "rusty-chip8"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Cem Eliguzel <cemeliguzel@email.com>"]
 license = "MIT OR Apache-2.0"
@@ -11,14 +11,18 @@ repository = "https://github.com/rimbi/rusty-chip8"
 keywords = ["game", "emulator", "chip8"]
 categories = ["games", "emulators"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[example]]
+name = "rusty-chip8-bevy"
+path = "examples/bevy.rs"
 
 [dependencies]
 anyhow = "1.0"
-bevy = { version = "0.9.0", features = ["dynamic"] }
-env_logger = "0.10.0"
 log = "0.4.17"
 rand = "0.8.5"
+
+[dev-dependencies]
+bevy = { version = "0.9.0", features = ["dynamic"] }
+env_logger = "0.10.0"
 structopt = "0.3"
 
 # Enable a small amount of optimization in debug mode
