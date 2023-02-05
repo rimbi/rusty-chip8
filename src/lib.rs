@@ -1,13 +1,22 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![deny(clippy::as_conversions)]
+#![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
+
 use std::{thread::sleep, time::Duration, vec};
 
 use anyhow::{bail, Context, Ok, Result};
 use log::debug;
 
-pub const TERMINAL_WIDTH: u8 = 64;
-pub const TERMINAL_HEIGHT: u8 = 32;
+/// Number of horizontal sprites.
+pub const TERMINAL_WIDTH: usize = 64;
+/// Number of vertical sprites.
+pub const TERMINAL_HEIGHT: usize = 32;
+/// Frame rate per second.
+pub const FPS: u64 = 60;
 const RAM_SIZE: usize = 4096;
 const PROGRAM_START: usize = 512;
-pub const FPS: u64 = 60;
 
 // Font settings
 const FONT_ADDR: usize = 0x50;
@@ -31,7 +40,7 @@ const FONTS: [u8; 80] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
-/// Chip8 emulator state.
+/// Chip8 emulator.
 #[derive(Debug, Default)]
 pub struct Chip8 {
     clock: u64,
@@ -45,87 +54,89 @@ pub struct Chip8 {
     sound_timer: u8,
     beeping: bool,
     key_pressed: Option<u8>,
-    waiting_for_input: Option<u8>,
+    waiting_for_input: Option<usize>,
 }
 
 /// Represents Chip8 instructions.
 #[derive(Debug, Clone, Copy)]
 enum Instruction {
     Cls00E0,
-    SetIndexRegisterANNN(u16),
-    SetVRegister6XNN(u8, u8),
-    Dxyn(u8, u8, u8),
-    Add7XNN(u8, u8),
+    SetIndexRegisterANNN(usize),
+    SetVRegister6XNN(usize, u8),
+    Dxyn(usize, usize, usize),
+    Add7XNN(usize, u8),
     Jump1NNN(u16),
     SubroutineCall2NNN(u16),
     SubroutineReturn00EE,
-    SkipEqual3XNN(u8, u8),
-    SkipNotEqual4XNN(u8, u8),
-    BinaryCodedDecimalConversionFX33(u8),
-    FontCharacterFX29(u8),
-    SetDelayTimerFX15(u8),
-    ReadDelayTimerFX07(u8),
-    GetKeyFX0A(u8),
-    SetSoundTimerFX18(u8),
-    AddToIndexFX1E(u8),
-    StoreRegistersToMemoryFX55(u8),
-    LoadRegistersFromMemoryFX65(u8),
-    RandomCXNN(u8, u8),
-    SkipIfKeyPressedEX9E(u8),
-    SkipIfKeyNotPressedEXA1(u8),
-    BinaryAnd8XY2(u8, u8),
-    RegisterAdd8XY4(u8, u8),
-    RegisterSet8XY0(u8, u8),
-    RegisterSub8XY5(u8, u8),
-    RegisterSubRev8XY7(u8, u8),
-    ShiftRight8XY6(u8, u8),
-    ShiftLeft8XYE(u8, u8),
-    SkipIfEqual5XY0(u8, u8),
-    SkipIfNotEqual9XY0(u8, u8),
-    Xor8XY3(u8, u8),
+    SkipEqual3XNN(usize, u8),
+    SkipNotEqual4XNN(usize, u8),
+    BinaryCodedDecimalConversionFX33(usize),
+    FontCharacterFX29(usize),
+    SetDelayTimerFX15(usize),
+    ReadDelayTimerFX07(usize),
+    GetKeyFX0A(usize),
+    SetSoundTimerFX18(usize),
+    AddToIndexFX1E(usize),
+    StoreRegistersToMemoryFX55(usize),
+    LoadRegistersFromMemoryFX65(usize),
+    RandomCXNN(usize, u8),
+    SkipIfKeyPressedEX9E(usize),
+    SkipIfKeyNotPressedEXA1(usize),
+    BinaryAnd8XY2(usize, usize),
+    RegisterAdd8XY4(usize, usize),
+    RegisterSet8XY0(usize, usize),
+    RegisterSub8XY5(usize, usize),
+    RegisterSubRev8XY7(usize, usize),
+    ShiftRight8XY6(usize, usize),
+    ShiftLeft8XYE(usize, usize),
+    SkipIfEqual5XY0(usize, usize),
+    SkipIfNotEqual9XY0(usize, usize),
+    Xor8XY3(usize, usize),
 }
 
 impl Instruction {
-    pub fn new(b1: u8, b2: u8) -> Result<Self> {
+    fn new(b1: u8, b2: u8) -> Result<Self> {
         let i = b1 >> 4;
         let x = b1 & 0xf;
         let y = b2 >> 4;
-        let n = b2 & 0xf;
+        let n = usize::from(b2 & 0xf);
         let nn = b2;
         let nnn = u16::from_ne_bytes([nn, x]);
+        let x = usize::from(x);
+        let y = usize::from(y);
         let ins = match (i, x, y, n, nn, nnn) {
-            (0, 0, 0xE, 0, _, _) => Instruction::Cls00E0,
-            (0xA, _, _, _, _, nnn) => Instruction::SetIndexRegisterANNN(nnn),
-            (1, _, _, _, _, nnn) => Instruction::Jump1NNN(nnn),
-            (6, x, _, _, nn, _) => Instruction::SetVRegister6XNN(x, nn),
-            (0xD, x, y, n, _, _) => Instruction::Dxyn(x, y, n),
-            (2, _, _, _, _, nnn) => Instruction::SubroutineCall2NNN(nnn),
-            (0, 0, 0xE, 0xE, _, _) => Instruction::SubroutineReturn00EE,
-            (3, x, _, _, nn, _) => Instruction::SkipEqual3XNN(x, nn),
-            (4, x, _, _, nn, _) => Instruction::SkipNotEqual4XNN(x, nn),
-            (5, x, y, 0, _, _) => Instruction::SkipIfEqual5XY0(x, y),
-            (9, x, y, 0, _, _) => Instruction::SkipIfNotEqual9XY0(x, y),
-            (7, x, _, _, nn, _) => Instruction::Add7XNN(x, nn),
-            (8, x, y, 3, _, _) => Instruction::Xor8XY3(x, y),
-            (0xF, x, 3, 3, _, _) => Instruction::BinaryCodedDecimalConversionFX33(x),
-            (0xF, x, 2, 9, _, _) => Instruction::FontCharacterFX29(x),
-            (0xF, x, 1, 5, _, _) => Instruction::SetDelayTimerFX15(x),
-            (0xF, x, 0, 7, _, _) => Instruction::ReadDelayTimerFX07(x),
-            (0xF, x, 0, 0xA, _, _) => Instruction::GetKeyFX0A(x),
-            (0xF, x, 1, 8, _, _) => Instruction::SetSoundTimerFX18(x),
-            (0xF, x, 1, 0xE, _, _) => Instruction::AddToIndexFX1E(x),
-            (0xF, x, 5, 5, _, _) => Instruction::StoreRegistersToMemoryFX55(x),
-            (0xF, x, 6, 5, _, _) => Instruction::LoadRegistersFromMemoryFX65(x),
-            (0xC, x, _, _, nn, _) => Instruction::RandomCXNN(x, nn),
-            (0xE, x, 9, 0xE, _, _) => Instruction::SkipIfKeyPressedEX9E(x),
-            (0xE, x, 0xA, 1, _, _) => Instruction::SkipIfKeyNotPressedEXA1(x),
-            (8, x, y, 2, _, _) => Instruction::BinaryAnd8XY2(x, y),
-            (8, x, y, 4, _, _) => Instruction::RegisterAdd8XY4(x, y),
-            (8, x, y, 0, _, _) => Instruction::RegisterSet8XY0(x, y),
-            (8, x, y, 5, _, _) => Instruction::RegisterSub8XY5(x, y),
-            (8, x, y, 6, _, _) => Instruction::ShiftRight8XY6(x, y),
-            (8, x, y, 0xE, _, _) => Instruction::ShiftLeft8XYE(x, y),
-            (8, x, y, 7, _, _) => Instruction::RegisterSubRev8XY7(x, y),
+            (0, 0, 0xE, 0, _, _) => Self::Cls00E0,
+            (0xA, _, _, _, _, nnn) => Self::SetIndexRegisterANNN(nnn.into()),
+            (1, _, _, _, _, nnn) => Self::Jump1NNN(nnn),
+            (6, x, _, _, nn, _) => Self::SetVRegister6XNN(x, nn),
+            (0xD, x, y, n, _, _) => Self::Dxyn(x, y, n),
+            (2, _, _, _, _, nnn) => Self::SubroutineCall2NNN(nnn),
+            (0, 0, 0xE, 0xE, _, _) => Self::SubroutineReturn00EE,
+            (3, x, _, _, nn, _) => Self::SkipEqual3XNN(x, nn),
+            (4, x, _, _, nn, _) => Self::SkipNotEqual4XNN(x, nn),
+            (5, x, y, 0, _, _) => Self::SkipIfEqual5XY0(x, y),
+            (9, x, y, 0, _, _) => Self::SkipIfNotEqual9XY0(x, y),
+            (7, x, _, _, nn, _) => Self::Add7XNN(x, nn),
+            (8, x, y, 3, _, _) => Self::Xor8XY3(x, y),
+            (0xF, x, 3, 3, _, _) => Self::BinaryCodedDecimalConversionFX33(x),
+            (0xF, x, 2, 9, _, _) => Self::FontCharacterFX29(x),
+            (0xF, x, 1, 5, _, _) => Self::SetDelayTimerFX15(x),
+            (0xF, x, 0, 7, _, _) => Self::ReadDelayTimerFX07(x),
+            (0xF, x, 0, 0xA, _, _) => Self::GetKeyFX0A(x),
+            (0xF, x, 1, 8, _, _) => Self::SetSoundTimerFX18(x),
+            (0xF, x, 1, 0xE, _, _) => Self::AddToIndexFX1E(x),
+            (0xF, x, 5, 5, _, _) => Self::StoreRegistersToMemoryFX55(x),
+            (0xF, x, 6, 5, _, _) => Self::LoadRegistersFromMemoryFX65(x),
+            (0xC, x, _, _, nn, _) => Self::RandomCXNN(x, nn),
+            (0xE, x, 9, 0xE, _, _) => Self::SkipIfKeyPressedEX9E(x),
+            (0xE, x, 0xA, 1, _, _) => Self::SkipIfKeyNotPressedEXA1(x),
+            (8, x, y, 2, _, _) => Self::BinaryAnd8XY2(x, y),
+            (8, x, y, 4, _, _) => Self::RegisterAdd8XY4(x, y),
+            (8, x, y, 0, _, _) => Self::RegisterSet8XY0(x, y),
+            (8, x, y, 5, _, _) => Self::RegisterSub8XY5(x, y),
+            (8, x, y, 6, _, _) => Self::ShiftRight8XY6(x, y),
+            (8, x, y, 0xE, _, _) => Self::ShiftLeft8XYE(x, y),
+            (8, x, y, 7, _, _) => Self::RegisterSubRev8XY7(x, y),
             _ => {
                 std::thread::sleep(Duration::from_secs(5));
                 bail!("unimplemented instruction: {} {} {} {}", i, x, y, n)
@@ -134,17 +145,40 @@ impl Instruction {
         Ok(ins)
     }
 
-    pub fn requires_pc_inc(&self) -> usize {
+    const fn requires_pc_inc(self) -> usize {
         match self {
-            Self::SubroutineCall2NNN(_) => 0,
-            Self::Jump1NNN(_) => 0,
+            Self::SubroutineCall2NNN(_) | Self::Jump1NNN(_) => 0,
             _ => 2,
         }
     }
 }
 
 impl Chip8 {
-    /// Fetches and decodes Chip8 instructions from RAM.
+    /// Returns a Chip8 instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `clock` - refers to the instructions per second. The common value used is `700`.
+    #[must_use]
+    pub fn new(clock: u64) -> Self {
+        let mut ram = vec![0; RAM_SIZE];
+        ram[FONT_ADDR..FONT_ADDR + FONTS.len()].copy_from_slice(&FONTS);
+        Self {
+            clock,
+            pixels: vec![vec![false; TERMINAL_WIDTH]; TERMINAL_HEIGHT],
+            ram,
+            pc: PROGRAM_START,
+            ..Default::default()
+        }
+    }
+
+    /// Fetches, decodes and executes Chip8 instructions from RAM.
+    ///
+    /// This function is supposed to be called [FPS] times per second.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an invalid (or unimplemented) instruction encountered.
     pub fn tick(&mut self, graphics: &mut impl Graphics, audio: &mut impl Audio) {
         self.decrease_timers();
         for _ in 0..self.clock / FPS {
@@ -168,6 +202,7 @@ impl Chip8 {
         }
     }
 
+    /// Decreases sound and delay timers.
     fn decrease_timers(&mut self) {
         self.delay_timer = self.delay_timer.saturating_sub(1);
         self.sound_timer = self.sound_timer.saturating_sub(1);
@@ -187,6 +222,7 @@ impl Chip8 {
     }
 
     /// Executes the Chip8 instruction.
+    #[allow(clippy::too_many_lines)]
     fn execute_instruction(
         &mut self,
         inst: Instruction,
@@ -206,16 +242,16 @@ impl Chip8 {
                         }
                     }
                 }
-                self.pixels = vec![vec![false; TERMINAL_WIDTH as usize]; TERMINAL_HEIGHT as usize];
+                self.pixels = vec![vec![false; TERMINAL_WIDTH]; TERMINAL_HEIGHT];
             }
-            Instruction::SetIndexRegisterANNN(nnn) => self.i = nnn as usize,
-            Instruction::SetVRegister6XNN(x, nn) => self.registers[x as usize] = nn,
+            Instruction::SetIndexRegisterANNN(nnn) => self.i = nnn,
+            Instruction::SetVRegister6XNN(x, nn) => self.registers[x] = nn,
             Instruction::Dxyn(x, y, n) => {
-                let x_org = (self.registers[x as usize] % TERMINAL_WIDTH) as usize;
-                let mut y = (self.registers[y as usize] % TERMINAL_HEIGHT) as usize;
+                let x_org = usize::from(self.registers[x]) % TERMINAL_WIDTH;
+                let mut y = usize::from(self.registers[y]) % TERMINAL_HEIGHT;
                 self.registers[15] = 0;
                 let mut collision = false;
-                let sprites = &self.ram[self.i..(self.i + n as usize)];
+                let sprites = &self.ram[self.i..self.i + n];
                 for row in sprites {
                     let mut x = x_org;
                     for i in (0..8).rev() {
@@ -232,12 +268,12 @@ impl Chip8 {
                             }
                         }
                         x += 1;
-                        if x == (TERMINAL_WIDTH as usize) {
+                        if x == TERMINAL_WIDTH {
                             break;
                         }
                     }
                     y += 1;
-                    if y == (TERMINAL_HEIGHT as usize) {
+                    if y == TERMINAL_HEIGHT {
                         break;
                     }
                 }
@@ -246,13 +282,13 @@ impl Chip8 {
                 }
             }
             Instruction::Add7XNN(x, nn) => {
-                let (res, _) = self.registers[x as usize].overflowing_add(nn);
-                self.registers[x as usize] = res;
+                let (res, _) = self.registers[x].overflowing_add(nn);
+                self.registers[x] = res;
             }
             Instruction::Jump1NNN(nnn) => self.pc = nnn.into(),
             Instruction::SubroutineCall2NNN(nnn) => {
                 self.stack.push(self.pc);
-                self.pc = nnn as usize;
+                self.pc = usize::from(nnn);
             }
             Instruction::SubroutineReturn00EE => {
                 self.pc = self
@@ -261,104 +297,99 @@ impl Chip8 {
                     .context("failed to return from subroutine: stack underflow")?;
             }
             Instruction::SkipEqual3XNN(x, nn) => {
-                if self.registers[x as usize] == nn {
+                if self.registers[x] == nn {
                     self.pc += 2;
                 }
             }
             Instruction::SkipNotEqual4XNN(x, nn) => {
-                if self.registers[x as usize] != nn {
+                if self.registers[x] != nn {
                     self.pc += 2;
                 }
             }
             Instruction::BinaryCodedDecimalConversionFX33(x) => {
-                let val = self.registers[x as usize];
+                let val = self.registers[x];
                 self.ram[self.i] = val / 100;
                 self.ram[self.i + 1] = (val % 100) / 10;
                 self.ram[self.i + 2] = val % 10;
             }
             Instruction::FontCharacterFX29(x) => {
-                self.i = FONT_ADDR + (self.registers[x as usize] as usize * FONT_SIZE)
+                self.i = FONT_ADDR + (usize::from(self.registers[x]) * FONT_SIZE);
             }
             Instruction::SetDelayTimerFX15(x) => {
-                self.delay_timer = self.registers[x as usize];
+                self.delay_timer = self.registers[x];
             }
-            Instruction::ReadDelayTimerFX07(x) => self.registers[x as usize] = self.delay_timer,
-            Instruction::SetSoundTimerFX18(x) => self.sound_timer = self.registers[x as usize],
+            Instruction::ReadDelayTimerFX07(x) => self.registers[x] = self.delay_timer,
+            Instruction::SetSoundTimerFX18(x) => self.sound_timer = self.registers[x],
             Instruction::AddToIndexFX1E(x) => {
-                let (res, overflow) = self.i.overflowing_add(self.registers[x as usize] as usize);
+                let (res, overflow) = self.i.overflowing_add(self.registers[x].into());
                 self.i = res;
                 if overflow {
                     self.registers[15] = 1;
                 }
             }
             Instruction::StoreRegistersToMemoryFX55(x) => {
-                let x = x as usize;
                 self.ram[self.i..=self.i + x].copy_from_slice(&self.registers[0..=x]);
             }
             Instruction::LoadRegistersFromMemoryFX65(x) => {
-                let x = x as usize;
                 let data = &self.ram[self.i..=self.i + x];
                 self.registers[0..=x].copy_from_slice(data);
             }
             Instruction::RandomCXNN(x, nn) => {
                 let r: u8 = rand::random();
-                self.registers[x as usize] = r & nn;
+                self.registers[x] = r & nn;
             }
             Instruction::SkipIfKeyPressedEX9E(x) => {
-                if self.key_pressed == Some(self.registers[x as usize]) {
+                if self.key_pressed == Some(self.registers[x]) {
                     self.pc += 2;
                 }
             }
             Instruction::SkipIfKeyNotPressedEXA1(x) => {
-                if self.key_pressed != Some(self.registers[x as usize]) {
+                if self.key_pressed != Some(self.registers[x]) {
                     self.pc += 2;
                 }
             }
             Instruction::BinaryAnd8XY2(x, y) => {
-                self.registers[x as usize] &= self.registers[y as usize]
+                self.registers[x] &= self.registers[y];
             }
             Instruction::RegisterAdd8XY4(x, y) => {
-                let (res, carry) =
-                    self.registers[x as usize].overflowing_add(self.registers[y as usize]);
-                self.registers[x as usize] = res;
-                self.registers[15] = carry as u8;
+                let (res, carry) = self.registers[x].overflowing_add(self.registers[y]);
+                self.registers[x] = res;
+                self.registers[15] = u8::from(carry);
             }
             Instruction::RegisterSet8XY0(x, y) => {
-                self.registers[x as usize] = self.registers[y as usize]
+                self.registers[x] = self.registers[y];
             }
             Instruction::RegisterSub8XY5(x, y) => {
-                let (res, carry) =
-                    self.registers[x as usize].overflowing_sub(self.registers[y as usize]);
-                self.registers[x as usize] = res;
-                self.registers[15] = !carry as u8;
+                let (res, carry) = self.registers[x].overflowing_sub(self.registers[y]);
+                self.registers[x] = res;
+                self.registers[15] = u8::from(!carry);
             }
             Instruction::RegisterSubRev8XY7(x, y) => {
-                let (res, carry) =
-                    self.registers[y as usize].overflowing_sub(self.registers[x as usize]);
-                self.registers[x as usize] = res;
-                self.registers[15] = !carry as u8;
+                let (res, carry) = self.registers[y].overflowing_sub(self.registers[x]);
+                self.registers[x] = res;
+                self.registers[15] = u8::from(!carry);
             }
             Instruction::GetKeyFX0A(x) => self.waiting_for_input = Some(x),
             Instruction::ShiftRight8XY6(x, _) => {
-                self.registers[15] = self.registers[x as usize] & 1u8;
-                self.registers[x as usize] >>= 1;
+                self.registers[15] = self.registers[x] & 1u8;
+                self.registers[x] >>= 1;
             }
             Instruction::ShiftLeft8XYE(x, _) => {
-                self.registers[15] = self.registers[x as usize] & (1u8 << 7);
-                self.registers[x as usize] <<= 1;
+                self.registers[15] = self.registers[x] & (1u8 << 7);
+                self.registers[x] <<= 1;
             }
             Instruction::SkipIfEqual5XY0(x, y) => {
-                if self.registers[x as usize] == self.registers[y as usize] {
-                    self.pc += 2
+                if self.registers[x] == self.registers[y] {
+                    self.pc += 2;
                 }
             }
             Instruction::SkipIfNotEqual9XY0(x, y) => {
-                if self.registers[x as usize] != self.registers[y as usize] {
-                    self.pc += 2
+                if self.registers[x] != self.registers[y] {
+                    self.pc += 2;
                 }
             }
             Instruction::Xor8XY3(x, y) => {
-                self.registers[x as usize] ^= self.registers[y as usize];
+                self.registers[x] ^= self.registers[y];
             }
         }
         Ok(())
@@ -374,6 +405,8 @@ impl Chip8 {
 
     /// Stores data in RAM.
     ///
+    /// # Errors
+    ///
     /// If the data is bigger than the available space it returns Error.
     pub fn store_in_ram(&mut self, rom: impl AsRef<[u8]>) -> Result<()> {
         let rom = &rom.as_ref();
@@ -384,61 +417,57 @@ impl Chip8 {
         Ok(())
     }
 
-    pub fn new(clock: u64) -> Self {
-        let mut ram = vec![0; RAM_SIZE];
-        ram[FONT_ADDR..FONT_ADDR + FONTS.len()].copy_from_slice(&FONTS);
-        Self {
-            clock,
-            pixels: vec![vec![false; TERMINAL_WIDTH as usize]; TERMINAL_HEIGHT as usize],
-            ram,
-            pc: PROGRAM_START,
-            ..Default::default()
-        }
-    }
-
+    /// Handles released key.
+    ///
+    /// The real key press/release logic is supposed to be handled by the client.
     pub fn handle_key_released(&mut self) {
         self.key_pressed = None;
     }
 
+    /// Handles pressed key.
+    ///
+    /// The real key press/release logic is supposed to be handled by the client.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key is supposed to be a value in the range `0..16`.
+    ///     Chip8's original keypad has 16 buttons.
     pub fn handle_key_pressed(&mut self, key: u8) {
         self.key_pressed = Some(key);
         if let Some(x) = self.waiting_for_input {
-            self.registers[x as usize] = key;
+            self.registers[x] = key;
             self.waiting_for_input = None;
         }
     }
 }
 
+/// Checks if the coordinates are valid.
 fn check_coordinates(x: usize, y: usize) -> Result<()> {
-    if x >= TERMINAL_WIDTH.into() {
+    if x >= TERMINAL_WIDTH {
         bail!("invalid X coordinate to draw: {}", x);
     }
-    if y >= TERMINAL_HEIGHT.into() {
+    if y >= TERMINAL_HEIGHT {
         bail!("invalid Y coordinate to draw: {}", y);
     }
     Ok(())
 }
 
-// Graphics abstraction for Chip8.
-//
-// Clients are supposed to implement this trait in accordance with
-// the graphics library used.
+/// Graphics abstraction for Chip8.
+///
+/// Clients are supposed to implement this trait in accordance with
+/// the graphics library used.
 pub trait Graphics {
     /// Clears/turns off a pixel on a specific coordinate.
-    ///
-    /// If the coordinates is out of the screen area it returns an Error.
     fn clear_pixel(&mut self, x: usize, y: usize);
 
     /// Draws/turns on a pixel on a specific coordinate.
-    ///
-    /// If the coordinates is out of the screen area it returns an Error.
     fn draw_pixel(&mut self, x: usize, y: usize);
 }
 
-// Graphics abstraction for Chip8.
-//
-// Clients are supposed to implement this trait in accordance with
-// the sound library used.
+/// Audio abstraction for Chip8.
+///
+/// Clients are supposed to implement this trait in accordance with
+/// the sound library used.
 pub trait Audio {
     /// Starts the beep sound.
     fn start_beep(&mut self);
