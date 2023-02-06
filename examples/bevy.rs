@@ -1,3 +1,9 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![deny(clippy::as_conversions)]
+#![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
+
 use anyhow::{Context, Ok, Result};
 use bevy::{
     diagnostic::FrameTimeDiagnosticsPlugin, input::keyboard::KeyboardInput, prelude::*,
@@ -27,15 +33,19 @@ impl BevyGraphics<'_, '_> {
     ///
     /// If the coordinates is out of the screen area it returns an Error.
     fn draw_pixel(&mut self, x: usize, y: usize, color: Option<Color>) {
-        let x = x as i32;
-        let y = y as i32;
+        let x =
+            i16::try_from(x).unwrap_or_else(|_| panic!("Invalid x coordinate for the sprite: {x}"));
+        let y =
+            i16::try_from(y).unwrap_or_else(|_| panic!("Invalid y coordinate for the sprite: {y}"));
+        let x = f32::from((x - 32) * 10);
+        let y = f32::from((16 - y) * 10);
         let rectangle = SpriteBundle {
             sprite: Sprite {
                 color: color.unwrap_or(Color::WHITE),
                 custom_size: Some(Vec2::new(10.0, 10.0)),
                 ..default()
             },
-            transform: Transform::from_xyz(((x - 32) * 10) as f32, ((16 - y) * 10) as f32, 0.),
+            transform: Transform::from_xyz(x, y, 0.),
             ..default()
         };
         self.commands.spawn(rectangle);
@@ -44,11 +54,11 @@ impl BevyGraphics<'_, '_> {
 
 impl Graphics for BevyGraphics<'_, '_> {
     fn clear_pixel(&mut self, x: usize, y: usize) {
-        self.draw_pixel(x, y, Some(Color::BLACK))
+        self.draw_pixel(x, y, Some(Color::BLACK));
     }
 
     fn draw_pixel(&mut self, x: usize, y: usize) {
-        self.draw_pixel(x, y, None)
+        self.draw_pixel(x, y, None);
     }
 }
 
@@ -60,11 +70,11 @@ struct AudioEmulator;
 
 impl Audio for AudioEmulator {
     fn start_beep(&mut self) {
-        info!("Starting BEEEEP!")
+        info!("Starting BEEEEP!");
     }
-    
+
     fn stop_beep(&mut self) {
-        info!("Stopping BEEEEP!")
+        info!("Stopping BEEEEP!");
     }
 }
 
@@ -74,6 +84,7 @@ struct CPUClock(Timer);
 #[derive(Resource)]
 struct TimerClock(Timer);
 
+#[allow(clippy::needless_pass_by_value)]
 fn tick(
     commands: Commands,
     time: Res<Time>,
@@ -136,7 +147,7 @@ fn keyboard_events(mut key_evr: EventReader<KeyboardInput>, mut ch8: ResMut<Chip
                 ) = ev.key_code
                 {
                     ch8.0
-                        .handle_key_pressed(keymap.get(&k.unwrap()).cloned().unwrap());
+                        .handle_key_pressed(keymap.get(&k.unwrap()).copied().unwrap());
                 }
             }
             ButtonState::Released => ch8.0.handle_key_released(),
@@ -179,8 +190,8 @@ fn main() -> Result<()> {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             window: WindowDescriptor {
                 title: "Chip8".to_string(),
-                width: (TERMINAL_WIDTH as u16 * 10).into(),
-                height: (TERMINAL_HEIGHT as u16 * 10).into(),
+                width: (u16::try_from(TERMINAL_WIDTH)? * 10).into(),
+                height: (u16::try_from(TERMINAL_HEIGHT)? * 10).into(),
                 present_mode: PresentMode::AutoVsync,
                 transparent: true,
                 ..default()
